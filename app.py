@@ -142,7 +142,7 @@ download_placeholder = st.empty()            # Download button above logs
 # Option to resume from row checkpoint.
 resume_option = False
 if os.path.exists(ROW_CHECKPOINT_FILE):
-    resume_option = st.checkbox("Resume from latest row checkpoint", value=True)
+    resume_option = st.checkbox("Resume from latest row checkpoint", value=False)
 
 # Toggle button for processing.
 toggle_label = "Stop Processing" if st.session_state.processing_running else "Start Processing"
