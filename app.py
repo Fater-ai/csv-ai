@@ -44,7 +44,6 @@ def generate_columns_to_use(header: List[str], criteria_prompt: str) -> List[str
             response_format=ColumnSelectionResult
         )
         selected = response.choices[0].message.parsed.columns
-        st.info(f"Dynamic column selection result: {selected}")
         return selected
     except Exception as e:
         st.error(f"Error during dynamic column selection: {e}")
@@ -78,18 +77,17 @@ def evaluate_candidate(candidate_info: dict, criteria_prompt: str) -> Classifica
         st.error(f"Error during candidate evaluation: {e}")
         return ClassificationResult(classification="no")
 
-def load_checkpoint() -> int:
+def load_row_checkpoint() -> int:
     if os.path.exists(ROW_CHECKPOINT_FILE):
         try:
             with open(ROW_CHECKPOINT_FILE, "r", encoding="utf-8") as cp_file:
                 index = int(cp_file.read().strip())
-                st.info(f"Resuming from row checkpoint: {index}")
                 return index
         except Exception as e:
             st.error(f"Error reading row checkpoint: {e}")
     return 0
 
-def update_checkpoint(index: int):
+def update_row_checkpoint(index: int):
     try:
         with open(ROW_CHECKPOINT_FILE, "w", encoding="utf-8") as cp_file:
             cp_file.write(str(index))
@@ -101,7 +99,6 @@ def load_criteria_checkpoint() -> str:
         try:
             with open(CRITERIA_CHECKPOINT_FILE, "r", encoding="utf-8") as f:
                 criteria = f.read().strip()
-                st.info("Loaded evaluation criteria from checkpoint.")
                 return criteria
         except Exception as e:
             st.error(f"Error reading criteria checkpoint: {e}")
@@ -114,88 +111,108 @@ def update_criteria_checkpoint(criteria: str):
     except Exception as e:
         st.error(f"Error updating criteria checkpoint: {e}")
 
-# Initialize session state for stopping processing.
-if "stop_processing" not in st.session_state:
-    st.session_state.stop_processing = False
+# Initialize session state for processing.
+if "processing_running" not in st.session_state:
+    st.session_state.processing_running = False
 
-def main():
-    st.title("Candidate Evaluation App with Checkpointing, Progress Bar, and Stop Button")
+def toggle_processing():
+    st.session_state.processing_running = not st.session_state.processing_running
+    try:
+        st.experimental_rerun()  # Rerun to immediately reflect the updated state.
+    except AttributeError:
+        st.write("Please refresh the page to see the updated state.")
 
-    uploaded_file = st.file_uploader("Upload CSV File", type="csv")
-    # Pre-populate criteria text input from checkpoint if available.
-    loaded_criteria = load_criteria_checkpoint()
-    criteria_prompt = st.text_input("Enter Candidate Evaluation Criteria", value=loaded_criteria)
-    if criteria_prompt:
-        update_criteria_checkpoint(criteria_prompt)
 
-    # Option to resume from row checkpoint if available.
-    resume_option = False
-    if os.path.exists(ROW_CHECKPOINT_FILE):
-        resume_option = st.checkbox("Resume from latest row checkpoint", value=True)
 
-    # Stop Processing button.
-    if st.button("Stop Processing"):
-        st.session_state.stop_processing = True
+st.title("Candidate Evaluation App")
 
-    if uploaded_file and criteria_prompt:
-        st.info("Processing candidates...")
-        csv_data = uploaded_file.getvalue().decode("utf-8").splitlines()
-        csv_reader = csv.reader(csv_data)
-        header = next(csv_reader)
-        header_mapping = {col: idx for idx, col in enumerate(header)}
-        data_rows = list(csv_reader)
-        total_rows = len(data_rows)
+uploaded_file = st.file_uploader("Upload CSV File", type="csv")
+loaded_criteria = load_criteria_checkpoint()
+criteria_prompt = st.text_input("Enter Candidate Evaluation Criteria", value=loaded_criteria)
+if criteria_prompt:
+    update_criteria_checkpoint(criteria_prompt)
 
-        # Determine starting index.
-        start_index = load_checkpoint() if resume_option else 0
+progress_placeholder = st.empty()            # Progress bar above logs
+# UI placeholders.
+log_area = st.empty()                        # Logs area
+download_placeholder = st.empty()            # Download button above logs
 
-        # Use dynamic column selection based on header and criteria.
-        selected_columns = generate_columns_to_use(header, criteria_prompt)
-        dynamic_columns = [col for col in selected_columns if col in header_mapping]
-        if not dynamic_columns:
-            st.warning("No dynamic columns selected; defaulting to full header.")
-            dynamic_columns = header
-        st.write("Using these columns for evaluation:", dynamic_columns)
+# Option to resume from row checkpoint.
+resume_option = False
+if os.path.exists(ROW_CHECKPOINT_FILE):
+    resume_option = st.checkbox("Resume from latest row checkpoint", value=True)
 
-        accepted_candidates = []
-        progress_bar = st.progress(0)
-        current_index = start_index
+# Toggle button for processing.
+toggle_label = "Stop Processing" if st.session_state.processing_running else "Start Processing"
+st.button(toggle_label, on_click=toggle_processing)
 
-        # Open output CSV in append mode if resuming.
-        mode = "a" if resume_option and os.path.exists(OUTPUT_CSV) else "w"
+
+# Collapsed expander for selected columns.
+with st.expander("Selected Columns for Evaluation (click to expand)", expanded=False):
+    selected_columns_placeholder = st.empty()
+
+if uploaded_file and criteria_prompt:
+    csv_data = uploaded_file.getvalue().decode("utf-8").splitlines()
+    csv_reader = csv.reader(csv_data)
+    header = next(csv_reader)
+    header_mapping = {col: idx for idx, col in enumerate(header)}
+    data_rows = list(csv_reader)
+    total_rows = len(data_rows)
+
+    # Get dynamic columns for evaluation.
+    selected_columns = generate_columns_to_use(header, criteria_prompt)
+    dynamic_columns = [col for col in selected_columns if col in header_mapping]
+    if not dynamic_columns:
+        st.warning("No dynamic columns selected; defaulting to full header.")
+        dynamic_columns = header
+    selected_columns_placeholder.write(dynamic_columns)
+
+    # Determine starting index.
+    start_index = load_row_checkpoint() if resume_option else 0
+
+    # Prepare output CSV: if not resuming, write header.
+    mode = "a" if resume_option and os.path.exists(OUTPUT_CSV) else "w"
+    if mode == "w":
         with open(OUTPUT_CSV, mode, newline="", encoding="utf-8") as fout:
             writer = csv.writer(fout)
-            if mode == "w":
-                writer.writerow(header)
-            for i in range(start_index, total_rows):
-                # Check for stop request.
-                if st.session_state.get("stop_processing", False):
-                    st.warning("Processing stopped by user.")
-                    break
+            writer.writerow(header)
 
-                row = data_rows[i]
-                if not row:
-                    continue
-                candidate_info = {col: row[header_mapping[col]] for col in dynamic_columns}
-                decision = evaluate_candidate(candidate_info, criteria_prompt)
-                if decision.classification == "yes":
+    progress_bar = progress_placeholder.progress(0)
+    accepted_candidates = []
+
+    if st.session_state.processing_running:
+        for i in range(start_index, total_rows):
+            if not st.session_state.processing_running:
+                break
+
+            row = data_rows[i]
+            if not row:
+                continue
+
+            candidate_info = {col: row[header_mapping[col]] for col in dynamic_columns}
+            decision = evaluate_candidate(candidate_info, criteria_prompt)
+            if decision.classification == "yes":
+                log_area.text(f"Candidate {i} kept.")
+                with open(OUTPUT_CSV, "a", newline="", encoding="utf-8") as fout:
+                    writer = csv.writer(fout)
                     writer.writerow(row)
-                    accepted_candidates.append(row)
-                current_index = i + 1
-                update_checkpoint(current_index)
-                progress_bar.progress((i + 1) / total_rows)
-                time.sleep(0.1)  # Give UI a chance to update
+                accepted_candidates.append(row)
+            else:
+                log_area.text(f"Candidate {i} rejected.")
 
-        st.info(f"Processed {current_index} out of {total_rows} rows.")
-        if os.path.exists(OUTPUT_CSV):
-            with open(OUTPUT_CSV, "r", encoding="utf-8") as f:
-                csv_content = f.read()
-            st.download_button("Download Accepted Candidates CSV", csv_content, file_name=OUTPUT_CSV)
-        # If all rows have been processed, remove row checkpoint.
-        if current_index >= total_rows:
+            update_row_checkpoint(i + 1)
+            progress_bar.progress((i + 1) / total_rows)
+            time.sleep(0.1)
+
+        if st.session_state.processing_running and (i + 1) >= total_rows:
+            st.session_state.processing_running = False
             if os.path.exists(ROW_CHECKPOINT_FILE):
                 os.remove(ROW_CHECKPOINT_FILE)
                 st.info("All candidates processed. Row checkpoint removed.")
 
-if __name__ == "__main__":
-    main()
+    if os.path.exists(OUTPUT_CSV):
+        with open(OUTPUT_CSV, "r", encoding="utf-8") as f:
+            csv_content = f.read()
+        download_placeholder.download_button("Download Accepted Candidates CSV", csv_content, file_name=OUTPUT_CSV)
+
+    st.info(f"Processed {load_row_checkpoint()} out of {total_rows} rows.")
