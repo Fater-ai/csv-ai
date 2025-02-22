@@ -17,7 +17,9 @@ class ClassificationResult(BaseModel):
 class ColumnSelectionResult(BaseModel):
     columns: List[str]
 
-client = OpenAI()
+client = OpenAI(
+    api_key = st.secrets["openai_api_key"]
+)
 
 # Checkpoint filenames.
 ROW_CHECKPOINT_FILE = "checkpoint.txt"
